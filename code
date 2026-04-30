@@ -1,0 +1,275 @@
+// ================= MOTOR =================
+#define PWMA 3
+#define AIN1 5
+#define AIN2 4
+
+#define PWMB 9
+#define BIN1 7
+#define BIN2 8
+
+#define STBY 6
+
+// ================= BUTTONS =================
+#define CAL_BTN 11
+#define START_BTN 10
+
+// ================= LED =================
+#define LED 13
+
+// ================= SENSORS =================
+int sensorPins[6] = {A0, A1, A2, A3, A4, A5};
+
+int minVal[6], maxVal[6], threshold[6];
+bool s[6];
+
+// ================= PID =================
+float Kp = 16;
+float Kd = 12;
+int lastError = 0;
+
+// ================= SPEED =================
+int BASE_SPEED = 160;
+
+
+// ================= STATE =================
+bool started = false;
+bool calibrated = false;
+
+// ================= MEMORY =================
+int linelost = 1;
+
+// ==========================================
+// MOTOR CONTROL
+// ==========================================
+void setMotor(int L, int R) {
+  L = constrain(L, -255, 255);
+  R = constrain(R, -255, 255);
+
+  if (L >= 0) {
+    digitalWrite(AIN1, HIGH);
+    digitalWrite(AIN2, LOW);
+  } else {
+    digitalWrite(AIN1, LOW);
+    digitalWrite(AIN2, HIGH);
+    L = -L;
+  }
+  analogWrite(PWMA, L);
+
+  if (R >= 0) {
+    digitalWrite(BIN1, HIGH);
+    digitalWrite(BIN2, LOW);
+  } else {
+    digitalWrite(BIN1, LOW);
+    digitalWrite(BIN2, HIGH);
+    R = -R;
+  }
+  analogWrite(PWMB, R);
+}
+
+// ==========================================
+// RAW SENSOR UPDATE (for calibration)
+// ==========================================
+void readRawSensors() {
+  for (int i = 0; i < 6; i++) {
+    int val = analogRead(sensorPins[i]);
+
+    if (val < minVal[i]) minVal[i] = val;
+    if (val > maxVal[i]) maxVal[i] = val;
+  }
+}
+
+// ==========================================
+// CALIBRATION
+// ==========================================
+void autoCalibrate() {
+
+  digitalWrite(LED, HIGH);
+
+  for (int i = 0; i < 6; i++) {
+    minVal[i] = 1023;
+    maxVal[i] = 0;
+  }
+
+  for (int t = 0; t < 100; t++) {
+    setMotor(-60, 60);
+    readRawSensors();
+    delay(10);
+  }
+
+  for (int t = 0; t < 200; t++) {
+    setMotor(60, -60);
+    readRawSensors();
+    delay(10);
+  }
+
+  for (int t = 0; t < 100; t++) {
+    setMotor(-60, 60);
+    readRawSensors();
+    delay(10);
+  }
+
+  setMotor(0, 0);
+
+  for (int i = 0; i < 6; i++) {
+    threshold[i] = (minVal[i] + maxVal[i]) / 2;
+  }
+
+  calibrated = true;
+  digitalWrite(LED, LOW);
+}
+
+// ==========================================
+// READ SENSORS
+// ==========================================
+void readSensors() {
+  for (int i = 0; i < 6; i++) {
+    int val = analogRead(sensorPins[i]);
+    s[i] = (val > threshold[i]);
+  }
+}
+
+// ==========================================
+// CHECK LINE
+// ==========================================
+bool isLineDetected() {
+  for (int i = 0; i < 6; i++) {
+    if (s[i]) return true;
+  }
+  return false;
+}
+
+// ==========================================
+// UPDATE MEMORY
+// ==========================================
+void updateLineMemory() {
+  if (s[0]) linelost = 1;
+  if (s[5]) linelost = 2;
+}
+
+// ==========================================
+// COMPUTE ERROR
+// ==========================================
+int computeError() {
+  int weights[6] = {-4, -2, -1, 1, 2, 4};
+  int error = 0;
+  int count = 0;
+
+  for (int i = 0; i < 6; i++) {
+    if (s[i]) {
+      error += weights[i];
+      count++;
+    }
+  }
+
+  if (count == 0) return 100;
+  return error;
+}
+
+// ==========================================
+// ADAPTIVE SPEED (NEW)
+// ==========================================
+int getAdaptiveBaseSpeed() {
+  if (s[0] || s[5]) {
+    return 140;   // slow on sharp turns
+  }
+  return BASE_SPEED;
+}
+
+// ==========================================
+// LINE LOST HANDLER
+// ==========================================
+void handleLineLost() {
+
+  int rotateSpeed = 180;
+
+  if (linelost == 1) {
+    setMotor(-rotateSpeed, rotateSpeed);
+  }
+  else if (linelost == 2) {
+    setMotor(rotateSpeed, -rotateSpeed);
+  }
+  else {
+    setMotor(-rotateSpeed, rotateSpeed);
+  }
+}
+
+// ==========================================
+// PID CONTROL
+// ==========================================
+void applyPID(int error) {
+
+  int currentBase = getAdaptiveBaseSpeed();
+
+  int correction = Kp * error + Kd * (error - lastError);
+
+  int left = currentBase + correction;
+  int right = currentBase - correction;
+
+  setMotor(left, right);
+
+  lastError = error;
+}
+
+// ==========================================
+// MAIN LOGIC
+// ==========================================
+void followLine() {
+
+  readSensors();
+
+  bool any = isLineDetected();
+
+  updateLineMemory();
+
+  if (!any) {
+    handleLineLost();
+    return;
+  }
+
+  int error = computeError();
+  applyPID(error);
+}
+
+// ==========================================
+// SETUP
+// ==========================================
+void setup() {
+
+  pinMode(PWMA, OUTPUT);
+  pinMode(AIN1, OUTPUT);
+  pinMode(AIN2, OUTPUT);
+
+  pinMode(PWMB, OUTPUT);
+  pinMode(BIN1, OUTPUT);
+  pinMode(BIN2, OUTPUT);
+
+  pinMode(STBY, OUTPUT);
+  digitalWrite(STBY, HIGH);
+
+  pinMode(CAL_BTN, INPUT_PULLUP);
+  pinMode(START_BTN, INPUT_PULLUP);
+
+  pinMode(LED, OUTPUT);
+}
+
+// ==========================================
+// LOOP
+// ==========================================
+void loop() {
+
+  if (digitalRead(CAL_BTN) == LOW) {
+    delay(200);
+    autoCalibrate();
+  }
+
+  if (digitalRead(START_BTN) == LOW) {
+    started = !started;
+    delay(300);
+  }
+
+  if (started && calibrated) {
+    followLine();
+  } else {
+    setMotor(0, 0);
+  }
+}
